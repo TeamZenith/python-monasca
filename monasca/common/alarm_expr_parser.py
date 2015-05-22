@@ -262,7 +262,6 @@ class AlarmExprParser(object):
         sub_expr_list = parseResult[0].operands_list
         return sub_expr_list
 
-
 def main():
     """Used for development and testing."""
 
@@ -270,7 +269,7 @@ def main():
         "max(-_.千幸福的笑脸{घोड़ा=馬,  "
         "dn2=dv2,千幸福的笑脸घ=千幸福的笑脸घ}) gte 100 "
         "times 3 && "
-        "(min(ເຮືອນ{dn3=dv3,家=дом}) < 10 or sum(biz{dn5=dv5}) >9 9and "
+        "(min(ເຮືອນ{dn3=dv3,家=дом}) < 10 or sum(biz{dn5=dv58}) >9 9and "
         "count(fizzle) lt 0 or count(baz) > 1)".decode('utf8'))
 
     expr1 = ("max(foo{hostname=mini-mon,千=千}, 120) > 100 and (max(bar)>100 "
@@ -282,6 +281,9 @@ def main():
         print ('orig expr: {}'.format(expr.encode('utf8')))
         alarmExprParser = AlarmExprParser(expr)
         sub_expr = alarmExprParser.sub_expr_list
+
+        print sub_expr
+
         for sub_expression in sub_expr:
             print ('sub expr: {}'.format(
                 sub_expression.sub_expr_str.encode('utf8')))
