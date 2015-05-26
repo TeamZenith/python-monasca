@@ -28,10 +28,10 @@ PROCESSOR_NAMESPACE = 'monasca.message.processor'
 
 th_opts = [
     cfg.MultiOpt('consume_topic', item_type=types.String(),
-                 default=['event','metrics','admin'],
+                 default=['event','metrics','alarmdefinitions'],
                  help='input topics'),
     cfg.MultiOpt('publish_topic', item_type=types.String(),
-                 default=['event', 'admin', 'alarm'],
+                 default=['event', 'alarmdefinitions', 'alarm'],
                  help='output topics')
 ]
 
@@ -60,21 +60,18 @@ class ThresholdingEngine(os_service.Service):
         while True:
             try:
 
-                if self._consume_kafka_conn.has_key('admin'):
-                    for msg in self._consume_kafka_conn['admin'].get_messages():
+                if self._consume_kafka_conn.has_key('alarmdefinitions'):
+                    for msg in self._consume_kafka_conn['alarmdefinitions'].get_messages():
                         if msg and msg.message:
                             LOG.debug(msg.message.value)
                             temp_admin = json.loads(msg.message.value)
-                            if temp_admin['type']:
-                                if temp_admin['type'] == 'alarm-definition':
-                                    self.thresholding_processors[temp_admin['name']] = driver.DriverManager(
-                                        PROCESSOR_NAMESPACE,
-                                        cfg.CONF.thresholding_engine.processor,
-                                        invoke_on_load=True,
-                                        invoke_kwds=(msg.message.value)).driver
-                                    LOG.debug(dir(self.thresholding_processors[temp_admin['name']]))
-
-                        self._consume_kafka_conn['admin'].commit()
+                            self.thresholding_processors[temp_admin['name']] = driver.DriverManager(
+                                PROCESSOR_NAMESPACE,
+                                cfg.CONF.thresholding_engine.processor,
+                                invoke_on_load=True,
+                                invoke_kwds=(msg.message.value)).driver
+                            LOG.debug(dir(self.thresholding_processors[temp_admin['name']]))
+                        self._consume_kafka_conn['alarmdefinitions'].commit()
 
                     if self._consume_kafka_conn.has_key('metrics'):
                         for msg in self._consume_kafka_conn['metrics'].get_messages():
