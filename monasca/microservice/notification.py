@@ -30,6 +30,7 @@ es_opts = [
                help=('The topic that messages will be retrieved from.'
                      'This also will be used as a doc type when saved '
                      'to ElasticSearch.')),
+
     cfg.StrOpt('doc_type',
                default='',
                help=('The document type which defines what document '
@@ -63,44 +64,47 @@ class Notification(os_service.Service):
             self._es_conn = es_conn.ESConnection(
                 cfg.CONF.notification.topic)
 
+    def handle_notification_msg(self, msg):
+        if msg and msg.message:
+            LOG.debug("Message received for Notification methods: " + msg.message.value)
+            value = msg.message.value
+            if value:
+                # value's format is:
+                # {"id":"c60ec47e-5038-4bf1-9f95-4046c6e9a759",
+                # "request":"POST",
+                # "name":"TheName",
+                # "type":"TheType",
+                # "Address":"TheAddress"}
+                # We add the POS/PUT/DEL in the message to indicate the request type
+
+                # Get the notification id from the message,
+                # this id will be used as _id for elasticsearch,
+                # and also stored as id in the notification_methods document type
+
+                # convert to dict, pop request, and get id
+                # after request is removed, the dict can be converted to request body for elasticsearch
+                dict_msg = ast.literal_eval(value)
+                request_type = dict_msg.pop("request", None)
+                id = dict_msg["id"]
+
+                if request_type != None and id != None:
+                    # post
+                    if request_type == 'POST':
+                        self._es_conn.post_messages(json.dumps(dict_msg), id)
+
+                    # put
+                    if request_type == 'PUT':
+                        self._es_conn.put_messages(json.dumps(dict_msg), id)
+
+                    # delete
+                    if request_type == 'DEL':
+                        self._es_conn.del_messages(id)
+
     def start(self):
         while True:
             try:
                 for msg in self._kafka_conn.get_messages():
-                    if msg and msg.message:
-                        LOG.debug("Message received for Notification methods: " + msg.message.value)
-                        value = msg.message.value
-                        if value:
-                            # value's format is:
-                            # {"id":"c60ec47e-5038-4bf1-9f95-4046c6e9a759",
-                            # "request":"POST",
-                            # "name":"TheName",
-                            # "type":"TheType",
-                            # "Address":"TheAddress"}
-                            # We add the POS/PUT/DEL in the message to indicate the request type
-
-                            # Get the notification id from the message,
-                            # this id will be used as _id for elasticsearch,
-                            # and also stored as id in the notification_methods document type
-
-                            # convert to dict, pop request, and get id
-                            # after request is removed, the dict can be converted to request body for elasticsearch
-                            dict_msg = ast.literal_eval(value)
-                            request_type = dict_msg.pop("request", None)
-                            id = dict_msg["id"]
-
-                            if request_type != None and id != None:
-                                # post
-                                if request_type == 'POST':
-                                    self._es_conn.post_messages(json.dumps(dict_msg), id)
-
-                                # put
-                                if request_type == 'PUT':
-                                    self._es_conn.put_messages(json.dumps(dict_msg), id)
-
-                                # delete
-                                if request_type == 'DEL':
-                                    self._es_conn.del_messages(id)
+                    self.handle_notification_msg(msg)
 
                 # if autocommit is set, this will be a no-op call.
                 self._kafka_conn.commit()
