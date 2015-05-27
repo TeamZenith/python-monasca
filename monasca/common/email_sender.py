@@ -20,6 +20,7 @@ def send_emails(to_addrs, subject, content):
     smtp.set_debuglevel(1)
 
     # connect
+
     try:
         print smtp.connect(HOST,PORT)
     except:

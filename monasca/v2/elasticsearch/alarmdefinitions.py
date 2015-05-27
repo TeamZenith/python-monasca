@@ -14,9 +14,11 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import ast
 import falcon
 from oslo.config import cfg
 import requests
+import uuid
 
 from monasca.common import es_conn
 from monasca.common import kafka_conn
@@ -52,42 +54,6 @@ class AlarmDefinitionUtil(object):
 			name = req.get_param('name')
 			if name and name.strip():
 				q.append({'match': {'name': name.strip()}})
-            
-			description = req.get_param('description')
-			if description:
-				q.append({'match': {'description': description}})
-			
-			expression = req.get_param('expression')
-			if expression:
-				q.append({'match': {'expression': expression}})
-			
-			expression_data = req.get_param('expression_data')
-			if expression_data:
-				q.append({'match': {'expression_data': expression_data}})
-			
-			match_by = req.get_param('match_by')
-			if match_by:
-				q.append({'match': {'match_by': match_by}})
-				
-			severity = req.get_param('severity')
-			if severity:
-				q.append({'match': {'severity': severity}})
-				
-			actions_enabled = req.get_param('actions_enabled')
-			if actions_enabled:
-				q.append({'match': {'actions_enabled': actions_enabled}})
-			
-			alarm_actions = req.get_param('alarm_actions')
-			if alarm_actions:
-				q.append({'match': {'alarm_actions': alarm_actions}})
-			
-			ok_actions = req.get_param('ok_actions')
-			if ok_actions:
-				q.append({'match': {'ok_actions': ok_actions}})
-				
-			undetermined_actions = req.get_param('undetermined_actions')
-			if undetermined_actions:
-				q.append({'match': {'undetermined_actions': undetermined_actions}})
 			
         except Exception:
             return False
@@ -104,16 +70,27 @@ class AlarmDefinitionDispatcher(object):
         self._kafka_conn = kafka_conn.KafkaConnection(self.topic)
         self._es_conn = es_conn.ESConnection(self.topic)
 
-        # Setup the get alarm definitions query body pattern
-        self._query_body = {
-            "query": {"bool": {"must": []}},
-            "size": self.size}
-
+        # Setup the get alarm definitions query url pattern
         self._query_url = ''.join([self._es_conn.uri,
                                   self._es_conn.index_prefix, '*/',
                                   cfg.CONF.alarmdefinitions.topic,
                                   '/_search?search_type=alarmdef'])
 
+	def post_data(self, req, res):
+		LOG.debug('Creating the alarm definitions')
+        msg = req.stream.read()
+
+		post_msg = ast.literal_eval(msg)
+		
+		# random uuid genearation for alarm definition
+		id = str(uuid.uuid4())
+		
+		post_msg["id"] = id
+		post_msg["request"] = "POST"
+		
+        code = self._kafka_conn.send_messages(json.dumps(msg))
+        res.status = getattr(falcon, 'HTTP_' + str(code))
+	
     def _get_alarm_definitions_response(self, res):
         if res and res.status_code == 200:
             obj = res.json()
@@ -126,11 +103,7 @@ class AlarmDefinitionDispatcher(object):
 
     @resource_api.Restify('/v2.0/alarm-definitions/', method='post')
     def do_post_alarm_definitions(self, req, res):
-        LOG.debug('Creating the alarm definitions')
-        msg = req.stream.read()
-
-        code = self._kafka_conn.send_messages(msg)
-        res.status = getattr(falcon, 'HTTP_' + str(code))
+        self.post_data(req, res)
 
     @resource_api.Restify('/v2.0/alarm-definitions/', method='get')
     def do_get_alarm_definitions(self, req, res):
@@ -138,12 +111,7 @@ class AlarmDefinitionDispatcher(object):
         # process query conditions
         query = []
         alarmdefinitionsparsing(req, query)
-        _measure_ag = self._measure_agg % {"size": self.size}
-        if query:
-            body = ('{"query":{"bool":{"must":' + json.dumps(query) + '}},'
-                    '"size":' + str(self.size) + ','
-        else:
-            body = ''
+        body = '' + query
 
         LOG.debug('Request body:' + body)
         es_res = requests.post(self._query_url, data=body)

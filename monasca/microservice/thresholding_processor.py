@@ -17,6 +17,7 @@
 import json
 import time
 import urllib
+import uuid
 from monasca.openstack.common import log
 from monasca.common import alarm_expr_parser_nilwyh as parser
 LOG = log.getLogger(__name__)
@@ -157,10 +158,6 @@ class ThresholdingProcessor(object):
 
         if self.alarm_definition.has_key('timestamp'):
             alarm['created_timestamp'] = self.alarm_definition['timestamp']
-        """
-        alarm_id = (urllib.quote(self.alarm_definition['id'].encode('utf8'), safe='')
-                    + '?' + urllib.quote(now, safe=''))
-        alarm['id'] = alarm_id
-
-        """
+        id = str(uuid.uuid4())
+        alarm['id'] = id
         return json.dumps(alarm)
