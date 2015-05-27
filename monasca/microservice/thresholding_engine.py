@@ -71,19 +71,19 @@ class ThresholdingEngine(os_service.Service):
                                 invoke_on_load=True,
                                 invoke_kwds=(msg.message.value)).driver
                             LOG.debug(dir(self.thresholding_processors[temp_admin['name']]))
-                        self._consume_kafka_conn['alarmdefinitions'].commit()
+                    self._consume_kafka_conn['alarmdefinitions'].commit()
 
-                    if self._consume_kafka_conn.has_key('metrics'):
-                        for msg in self._consume_kafka_conn['metrics'].get_messages():
-                            if msg and msg.message:
-                                LOG.debug(msg.message.value)
-                                for alarm_def in self.thresholding_processors.keys():
-                                    alarm = self.thresholding_processors[alarm_def].process_msg(
-                                        msg.message.value)
-                                    if alarm and self._publish_kafka_conn['alarm']:
-                                        self._publish_kafka_conn['alarm'].send_messages(alarm)
+                if self._consume_kafka_conn.has_key('metrics'):
+                    for msg in self._consume_kafka_conn['metrics'].get_messages():
+                        if msg and msg.message:
+                            LOG.debug(msg.message.value)
+                            for alarm_def in self.thresholding_processors.keys():
+                                alarm = self.thresholding_processors[alarm_def].process_msg(
+                                    msg.message.value)
+                                if alarm and self._publish_kafka_conn['alarm']:
+                                    self._publish_kafka_conn['alarm'].send_messages(alarm)
 
-                        self._publish_kafka_conn['alarm'].commit()
+                    self._publish_kafka_conn['alarm'].commit()
 
             except Exception:
                 LOG.exception('Error occurred while handling kafka messages.')
