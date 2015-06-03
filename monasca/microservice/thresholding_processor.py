@@ -1,12 +1,11 @@
-# Copyright 2013 IBM Corp
-#
-# Author: Tong Li <litong01@us.ibm.com>
+# Copyright 2015 CMU
+# Author: Yihan Wang <wangff9@gmail.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
 # a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -14,150 +13,209 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import collections
 import json
-import time
-import urllib
-import uuid
+from monasca.common import alarm_expr_calculator as calculator
+from monasca.common import alarm_expr_parser as parser
 from monasca.openstack.common import log
-from monasca.common import alarm_expr_parser_nilwyh as parser
+import time
+import uuid
+
+
 LOG = log.getLogger(__name__)
-
-
-def calc_value(data_list, func):
-    value = 0.0
-    if func == 'sum':
-        value = 0.0
-        for x in data_list:
-            value += x[1]
-    elif func == 'avg':
-        value = 0.0
-        for x in data_list:
-            value += x[1]
-        value /= len(data_list)
-    elif func == 'max':
-        value = data_list[0][1]
-        for x in data_list:
-            value = max(value, x[1])
-    elif func == 'min':
-        value = data_list[0][1]
-        for x in data_list:
-            value = min(value, x[1])
-    elif func == 'count':
-        value = len(data_list)
-    return value
-
-
-def get_state(logic_tree):
-    return get_sub_state(logic_tree)
-
-
-def get_sub_state(root):
-    if not root.has_key('value'):
-        return root['state']
-    if root['value'] == 'and':
-        ls = get_sub_state(root['left'])
-        rs = get_sub_state(root['right'])
-        if ls == 'UNDETERMINED' or rs == 'UNDETERMINED':
-            return 'UNDETERMINED'
-        if ls == 'OK' or rs =='OK':
-            return 'OK'
-        else:
-            return 'ALARM'
-    elif root['value'] == 'or':
-        ls = get_sub_state(root['left'])
-        rs = get_sub_state(root['right'])
-        if ls == 'ALARM' or rs == 'ALARM':
-            return 'ALARM'
-        if ls == 'UNDETERMINED' or rs =='UNDETERMINED':
-            return 'UNDETERMINED'
-        else:
-            return 'OK'
-    return 'UNDETERMINED'
 
 
 class ThresholdingProcessor(object):
     def __init__(self, alarm_def):
-        LOG.debug('initializing AlarmProcessor!')
+        """One processor instance hold one alarm definition."""
+        LOG.debug('initializing ThresholdProcessor!')
         super(ThresholdingProcessor, self).__init__()
         self.alarm_definition = json.loads(alarm_def)
-        #(avg(cpu,user_perc{hostname=devstack}) > 10)
         self.expression = self.alarm_definition['expression']
-        alarm_parser = parser.AlarmExprParser(self.expression)
-        self.logic_tree = alarm_parser.get_logic_tree()
-        self.sub_expression = alarm_parser.get_sub_expr_list()
-        self.state_current = 'UNDETERMINED'
+        self.match_by = self.alarm_definition['match_by']
+        self.expr_data_queue = {}
+        if len(self.match_by) == 0:
+            self.match_by = None
+        self.parse_result = (
+            parser.AlarmExprParser(self.expression).parse_result)
+        self.sub_expr_list = self.parse_result.operands_list
+        LOG.debug('successfully initialize ThresholdProcessor!')
 
-    def process_msg(self, msg):
+    def process_metrics(self, metrics):
+        """Add new metrics to matched expr."""
         try:
-            data = json.loads(msg)
-            updated = False
-            for sub_expr in self.sub_expression:
-                if self.update_expr(sub_expr, data):
-                    updated = True
-            if not updated:
-                return None
-            state_new = get_state(self.logic_tree)
-            if state_new != self.state_current:
-                self.state_current = state_new
-                return self.build_alarm(data)
-            else:
-                return None
+            data = json.loads(metrics)
+            self.add_expr_metrics(data)
         except Exception:
-            #LOG.exception('')
-            return None
+            LOG.exception('process metrics error')
 
-    def update_expr(self, sub_expr, data):
-        name = data['name']
-        dimensions = data['dimensions']
+    def process_alarms(self):
+        """Run every minute to produce alarm."""
+        try:
+            alarm_list = []
+            for m in self.expr_data_queue.keys():
+                if_updated = self.update_state(self.expr_data_queue[m])
+                if if_updated:
+                    alarm_list.append(self.build_alarm(m))
+            return alarm_list
+        except Exception:
+            LOG.exception('process metrics error')
+            return []
 
-        if name != sub_expr['metrics_name']:
-            return False
-        for dimension in sub_expr['dimensions']:
-            if dimensions[dimension]:
-                if dimensions[dimension] != sub_expr['dimensions'][dimension]:
-                    return False
+    def update_state(self, expr_data):
+        """Update the state of each alarm under this alarm definition."""
+
+        def _calc_state(operand):
+            if operand.logic_operator:
+                subs = []
+                for o in operand.sub_expr_list:
+                    subs.append(_calc_state(o))
+                return calculator.calc_logic(operand.logic_operator, subs)
             else:
+                return expr_data['data'][operand.fmtd_sub_expr_str]['state']
+
+        for sub_expr in self.sub_expr_list:
+            self.update_sub_expr_state(sub_expr, expr_data)
+        state_new = _calc_state(self.parse_result)
+        if state_new != expr_data['state']:
+            expr_data['state'] = state_new
+            return True
+        else:
+            return False
+
+    def update_sub_expr_state(self, expr, expr_data):
+        def _update_metrics():
+            """Delete metrics not in period."""
+            data_list = expr_data['data'][expr.fmtd_sub_expr_str]['metrics']
+            start_time = t_now - (float(expr.period) + 2) * int(expr.periods)
+            while (len(data_list) != 0
+                   and data_list[0]['timestamp'] < start_time):
+                data_list.popleft()
+
+        def _update_state():
+            """Update state of a sub expr."""
+            data_sub = expr_data['data'][expr.fmtd_sub_expr_str]
+            data_list = data_sub['metrics']
+            if len(data_list) == 0:
+                data_sub['state'] = 'UNDETERMINED'
+            else:
+                period = float(expr.period)
+                right = t_now
+                left = right - period
+                temp_data = []
+                value_in_periods = []
+                for i in range(len(data_list) - 1, -1, -1):
+                    if data_list[i]['timestamp'] >= left:
+                        temp_data.append(data_list[i]['value'])
+                    else:
+                        value = calculator.calc_value(
+                            expr.normalized_func, temp_data)
+                        value_in_periods.append(value)
+                        right = left
+                        left = right - period
+                        temp_data = []
+                value = calculator.calc_value(
+                    expr.normalized_func, temp_data)
+                value_in_periods.append(value)
+                expr_data['data'][expr.fmtd_sub_expr_str]['state'] = (
+                    calculator.compare_thresh(
+                        value_in_periods,
+                        expr.normalized_operator,
+                        float(expr.threshold)))
+
+        t_now = time.time()
+        _update_metrics()
+        _update_state()
+
+    def add_expr_metrics(self, data):
+        """Add new metrics to matched place."""
+        for sub_expr in self.sub_expr_list:
+            self.add_sub_expr_metrics(sub_expr, data)
+
+    def add_sub_expr_metrics(self, expr, data):
+        """Add new metrics to sub expr place."""
+
+        def _has_match_expr():
+            if (data['name'].lower().encode('utf8') !=
+                    expr.normalized_metric_name.encode('utf8')):
                 return False
-        # a deque
-        data_list = sub_expr['data_list']
-        data_list.append((data['timestamp'], data['value']))
-        # assume later timestamp metrics will be received by engine later
-        start_time = int(data['timestamp']) - int(sub_expr['period'])
-        while len(data_list) != 0 and data_list[0][0] < start_time:
-            data_list.popleft()
-        if len(data_list) == 0:
-            sub_expr['state'] = 'UNDETERMINED'
+            metrics_dimensions = {}
+            if 'dimensions' in data:
+                metrics_dimensions = data['dimensions']
+            def_dimensions = expr.dimensions_as_dict
+            for dimension_key in def_dimensions.keys():
+                if dimension_key in metrics_dimensions:
+                    if (metrics_dimensions[
+                            dimension_key].lower().encode('utf8')
+                            != def_dimensions[
+                            dimension_key].lower().encode('utf8')):
+                        return False
+                else:
+                    return False
             return True
 
-        value_cur = calc_value(data_list, sub_expr['function'])
-        value_thresh = sub_expr['threshold']
-        op = sub_expr['operator']
-        state = 'UNDETERMINED'
-        if op == 'GT' and value_cur > value_thresh:
-            state = 'ALARM'
-        elif op == 'LT' and value_thresh > value_cur:
-            state = 'ALARM'
-        elif op == 'LTE' and value_cur <= value_thresh:
-            state = 'ALARM'
-        elif op == 'GTE' and value_thresh <= value_cur:
-            state = 'ALARM'
+        def _add_metrics():
+            if self.match_by:
+                q_name = self.get_matched_data_queue_name(data)
+                if q_name:
+                    temp = self.expr_data_queue[q_name]['data']
+                    data_list = temp[expr.fmtd_sub_expr_str]['metrics']
+                    data_list.append(data)
+            else:
+                if None not in self.expr_data_queue:
+                    self.create_data_item(None)
+                temp = self.expr_data_queue[None]['data']
+                data_list = temp[expr.fmtd_sub_expr_str]['metrics']
+                data_list.append(data)
+
+        if _has_match_expr():
+            _add_metrics()
+
+    def create_data_item(self, name):
+        """If not exist in dict, create one item."""
+        ts = time.time()
+        self.expr_data_queue[name] = {
+            'data': {},
+            'state': 'UNDETERMINED',
+            'create_timestamp': ts,
+            'update_timestamp': ts}
+        for expr in self.sub_expr_list:
+            self.expr_data_queue[name]['data'][expr.fmtd_sub_expr_str] = {
+                'state': 'UNDETERMINED',
+                'metrics': collections.deque()}
+
+    def get_matched_data_queue_name(self, data):
+        name = ''
+        for m in self.match_by:
+            if m in data['dimensions']:
+                name = name + data['dimensions'][m]
+            else:
+                return None
+        if name in self.expr_data_queue:
+            return name
         else:
-            state = 'OK'
-        sub_expr['state'] = state
-        return True
+            self.create_data_item(name)
+            return name
 
-    def build_alarm(self, data):
+    def build_alarm(self, name):
+        """Build alarm json."""
         alarm = {}
-        alarm['alarm-definition'] = self.alarm_definition
-
-        alarm['metrics'] = data
-        alarm['state'] = self.state_current
-
-        now = int(time.time())
-        alarm['state_updated_timestamp'] = now
-
-        if self.alarm_definition.has_key('timestamp'):
-            alarm['created_timestamp'] = self.alarm_definition['timestamp']
         id = str(uuid.uuid4())
         alarm['id'] = id
+        alarm['alarm-definition'] = self.alarm_definition
+        alarm['metrics'] = self.get_all_metrics(name)
+        alarm['state'] = self.expr_data_queue[name]['state']
+        t = self.expr_data_queue[name]['update_timestamp']
+        alarm['state_updated_timestamp'] = t
+        alarm['updated_timestamp'] = t
+        alarm['created_timestamp'] = (
+            self.expr_data_queue[name]['create_timestamp'])
         return json.dumps(alarm)
+
+    def get_all_metrics(self, name):
+        """Get all metrics related to one alarm."""
+        metrics_list = []
+        for expr in self.expr_data_queue[name]['data'].keys():
+            for metrics in self.expr_data_queue[name]['data'][expr]['metrics']:
+                metrics_list.append(metrics)
+        return metrics_list
