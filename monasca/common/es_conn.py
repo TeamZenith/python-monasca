@@ -67,8 +67,10 @@ class ESConnection(object):
         index = self._index_strategy.get_index(day)
         self.post_path = '%s%s%s/%s/_bulk' % (self.uri, self.index_prefix,
                                               index, self.doc_type)
+
         self.base_path = '%s%s%s/%s' % (self.uri, self.index_prefix,
-                                        index, self.doc_type)
+                                              index, self.doc_type)
+
         LOG.debug('ElasticSearch Connection initialized successfully!')
 
     def send_messages(self, msg):
@@ -93,7 +95,7 @@ class ESConnection(object):
             return ''
         else:
             path = self.base_path + '/_search?q=_id:' + id
-            LOG.debug('Search path:' + path)
+            LOG.debug('Search path:'+ path)
             res = requests.get(path)
             LOG.debug('Msg get with response code: %s' % res.status_code)
             return res
@@ -103,7 +105,7 @@ class ESConnection(object):
         if self.drop_data:
             return
         else:
-            res = requests.post(self.base_path + '/' + id, data=msg)
+            res = requests.post(self.base_path + '/' + id , data=msg)
             LOG.debug('Msg post with response code: %s' % res.status_code)
 
     def put_messages(self, msg, id):
@@ -111,7 +113,7 @@ class ESConnection(object):
         if self.drop_data:
             return
         else:
-            res = requests.put(self.base_path + '/' + id, data=msg)
+            res = requests.put(self.base_path + '/' + id , data=msg)
             LOG.debug('Msg put with response code: %s' % res.status_code)
 
     def del_messages(self, id):

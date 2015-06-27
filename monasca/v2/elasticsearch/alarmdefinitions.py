@@ -14,17 +14,16 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-
 import ast
 import falcon
 from oslo.config import cfg
+import requests
 import uuid
 
 from monasca.common import es_conn
 from monasca.common import kafka_conn
 from monasca.common import resource_api
 from monasca.openstack.common import log
-
 
 try:
     import ujson as json
@@ -40,9 +39,7 @@ alarmdefinitions_opts = [
                      'the limit will be discarded.')),
 ]
 
-
-alarmdefinitions_group = cfg.OptGroup(
-    name='alarmdefinitions', title='alarmdefinitions')
+alarmdefinitions_group = cfg.OptGroup(name='alarmdefinitions', title='alarmdefinitions')
 cfg.CONF.register_group(alarmdefinitions_group)
 cfg.CONF.register_opts(alarmdefinitions_opts, alarmdefinitions_group)
 
@@ -52,21 +49,19 @@ LOG = log.getLogger(__name__)
 class AlarmDefinitionUtil(object):
 
     @staticmethod
-    def severityparsing(msg):
+    def alarmdefinitionsparsing(req, q):
         try:
-            severity = msg["severity"]
-            if severity == 'LOW' or severity == 'MEDIUM' or severity == 'HIGH' or severity == 'CRITICAL':
-                return msg
-            else:
-                msg["severity"] = "LOW"
-                return msg
-
+			name = req.get_param('name')
+			if name and name.strip():
+				q.append({'match': {'name': name.strip()}})
+			
         except Exception:
-            return msg
+            return False
+
+        return True
 
 
 class AlarmDefinitionDispatcher(object):
-
     def __init__(self, global_conf):
         LOG.debug('Initializing AlarmDefinition V2API!')
         super(AlarmDefinitionDispatcher, self).__init__()
@@ -75,100 +70,57 @@ class AlarmDefinitionDispatcher(object):
         self._kafka_conn = kafka_conn.KafkaConnection(self.topic)
         self._es_conn = es_conn.ESConnection(self.topic)
 
-    def post_data(self, req, res):
-        LOG.debug('Creating the alarm definitions')
-        msg = req.stream.read()
-        post_msg = ast.literal_eval(msg)
+        # Setup the get alarm definitions query url pattern
+        self._query_url = ''.join([self._es_conn.uri,
+                                  self._es_conn.index_prefix, '*/',
+                                  cfg.CONF.alarmdefinitions.topic,
+                                  '/_search?search_type=alarmdef'])
 
-        # random uuid genearation for alarm definition
-        id = str(uuid.uuid4())
-        post_msg["id"] = id
-        post_msg = AlarmDefinitionUtil.severityparsing(post_msg)
-        post_msg["request"] = "POST"
-        LOG.debug("Post Alarm Definition method: %s" % post_msg)
-        code = self._kafka_conn.send_messages(json.dumps(post_msg))
-        res.status = getattr(falcon, 'HTTP_' + str(code))
-
-    def put_data(self, req, res, id):
-        LOG.debug("Put the alarm definitions with id: %s" % id)
-
+	def post_data(self, req, res):
+		LOG.debug('Creating the alarm definitions')
         msg = req.stream.read()
 
-        put_msg = ast.literal_eval(msg)
-
-        put_msg["id"] = id
-
-        put_msg = AlarmDefinitionUtil.severityparsing(put_msg)
-
-        put_msg["request"] = "PUT"
-
-        LOG.debug("Put Alarm Definitions method data: %s" % put_msg)
-        code = self._kafka_conn.send_messages(json.dumps(put_msg))
+		post_msg = ast.literal_eval(msg)
+		
+		# random uuid genearation for alarm definition
+		id = str(uuid.uuid4())
+		
+		post_msg["id"] = id
+		post_msg["request"] = "POST"
+		
+        code = self._kafka_conn.send_messages(json.dumps(msg))
         res.status = getattr(falcon, 'HTTP_' + str(code))
-
-    def del_data(self, req, res, id):
-        LOG.debug("Deleting the alarm definitions with id: %s" % id)
-        del_msg = {}
-
-        del_msg["id"] = id
-
-        del_msg["request"] = "DEL"
-
-        LOG.debug("Delete Alarm Definitions method data: %s" % del_msg)
-        code = self._kafka_conn.send_messages(json.dumps(del_msg))
-        res.status = getattr(falcon, 'HTTP_' + str(code))
-
+	
     def _get_alarm_definitions_response(self, res):
         if res and res.status_code == 200:
             obj = res.json()
             if obj:
-                return obj.get('hits')
+                return obj.get('alarmdefinitions')
             return None
         else:
             return None
+ 
 
     @resource_api.Restify('/v2.0/alarm-definitions/', method='post')
     def do_post_alarm_definitions(self, req, res):
         self.post_data(req, res)
 
-    @resource_api.Restify('/v2.0/alarm-definitions/{id}', method='get')
-    def do_get_alarm_definitions(self, req, res, id):
+    @resource_api.Restify('/v2.0/alarm-definitions/', method='get')
+    def do_get_alarm_definitions(self, req, res):
         LOG.debug('The alarm definitions GET request is received!')
-        LOG.debug(id)
+        # process query conditions
+        query = []
+        alarmdefinitionsparsing(req, query)
+        body = '' + query
 
-        es_res = self._es_conn.get_message_by_id(id)
+        LOG.debug('Request body:' + body)
+        es_res = requests.post(self._query_url, data=body)
         res.status = getattr(falcon, 'HTTP_%s' % es_res.status_code)
 
-        LOG.debug('Query to ElasticSearch returned Status: %s' %
-                  es_res.status_code)
-        es_res = self._get_alarm_definitions_response(es_res)
-        LOG.debug('Query to ElasticSearch returned: %s' % es_res)
-
-        if es_res["hits"]:
-            res_data = es_res["hits"][0]
-            if res_data:
-                res.body = json.dumps([{
-                    "id": id,
-                    "links": [{"rel": "self",
-                               "href": req.uri}],
-                    "name": res_data["_source"]["name"],
-                    "description":res_data["_source"]["description"],
-                    "expression":res_data["_source"]["expression"],
-                    "severity":res_data["_source"]["severity"],
-                    "match_by":res_data["_source"]["match_by"],
-                    "alarm_actions":res_data["_source"]["alarm_actions"],
-                    "ok_actions":res_data["_source"]["ok_actions"],
-                    "undetermined_actions":res_data["_source"]["undetermined_actions"]}])
-                res.content_type = 'application/json;charset=utf-8'
-            else:
-                res.body = ''
+        LOG.debug('Query to ElasticSearch returned: %s' % es_res.status_code)
+        res_data = self._get_alarm_definitions_response(es_res)
+        if res_data:
+            res.body = ''.join(res_data)
+            res.content_type = 'application/json;charset=utf-8'
         else:
             res.body = ''
-
-    @resource_api.Restify('/v2.0/alarm-definitions/{id}', method='put')
-    def do_put_notification_methods(self, req, res, id):
-        self.put_data(req, res, id)
-
-    @resource_api.Restify('/v2.0/alarm-definitions/{id}', method='delete')
-    def do_delete_notification_methods(self, req, res, id):
-        self.del_data(req, res, id)
