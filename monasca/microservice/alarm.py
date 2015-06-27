@@ -14,10 +14,10 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+
 import ast
 import json
 from oslo.config import cfg
-from stevedore import driver
 
 from monasca.common import es_conn
 from monasca.common import kafka_conn
@@ -26,7 +26,7 @@ from monasca.openstack.common import service as os_service
 
 es_opts = [
     cfg.StrOpt('topic',
-               default='alarmdefinitions',
+               default='alarms',
                help=('The topic that messages will be retrieved from.'
                      'This also will be used as a doc type when saved '
                      'to ElasticSearch.')),
@@ -42,49 +42,63 @@ es_opts = [
                      'leave the default')),
 ]
 
-es_group = cfg.OptGroup(name='alarmdefinitions', title='alarmdefinitions')
+es_group = cfg.OptGroup(name='alarms', title='alarms')
 cfg.CONF.register_group(es_group)
 cfg.CONF.register_opts(es_opts, es_group)
 
 LOG = log.getLogger(__name__)
 
 
-class AlarmDefintion(os_service.Service):
+class Alarm(os_service.Service):
+
     def __init__(self, threads=1000):
-        super(AlarmDefintion, self).__init__(threads)
+        super(Alarm, self).__init__(threads)
         self._kafka_conn = kafka_conn.KafkaConnection(
-            cfg.CONF.alarmdefinitions.topic)
+            cfg.CONF.alarms.topic)
 
         # Use doc_type if it is defined.
-        if cfg.CONF.alarmdefinitions.doc_type:
+        if cfg.CONF.alarms.doc_type:
             self._es_conn = es_conn.ESConnection(
-                cfg.CONF.alarmdefinitions.doc_type)
+                cfg.CONF.alarms.doc_type)
         else:
             self._es_conn = es_conn.ESConnection(
-                cfg.CONF.alarmdefinitions.topic)
+                cfg.CONF.alarms.topic)
 
     def start(self):
         while True:
             try:
                 for msg in self._kafka_conn.get_messages():
                     if msg and msg.message:
-                        LOG.debug("Message received for Alarm Definition methods: " + msg.message.value)
+                        LOG.debug(
+                            "Message received for Alarm methods: " + msg.message.value)
                         value = msg.message.value
-                        if value:                            
-                            alarmdefmessage = ast.literal_eval(value)
-                            request_type = alarmdefmessage.pop("request", None)
-                            id = alarmdefmessage["id"]
 
-                            if request_type != None and id != None:
+                        if value:
+                            alarmmessage = ast.literal_eval(value)
+                            request_type = alarmmessage.pop("request", None)
+                            id = alarmmessage["id"]
+
+                            if request_type is not None and id is not None:
                                 # post
                                 if request_type == 'POST':
-                                    self._es_conn.post_messages(json.dumps(alarmdefmessage), id)
-                              
+                                    self._es_conn.post_messages(
+                                        json.dumps(alarmmessage), id)
+
+                                # put
+                                if request_type == 'PUT':
+                                    self._es_conn.put_messages(
+                                        json.dumps(alarmmessage), id)
+
+                                # delete
+                                if request_type == 'DEL':
+                                    self._es_conn.del_messages(id)
+
                 # if autocommit is set, this will be a no-op call.
                 self._kafka_conn.commit()
             except Exception:
-                LOG.exception('Error occurred while handling alarmdefinitions kafka messages.')
+                LOG.exception(
+                    'Error occurred while handling kafka messages for Alarms.')
 
     def stop(self):
         self._kafka_conn.close()
-        super(Notification, self).stop()
+        super(Alarm, self).stop()
